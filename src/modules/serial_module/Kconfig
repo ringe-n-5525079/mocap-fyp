@@ -1,0 +1,5 @@
+menuconfig MODULES_SERIAL_MODULE
+	bool "serial_module"
+	default n
+	---help---
+		Enable support for serial_module
