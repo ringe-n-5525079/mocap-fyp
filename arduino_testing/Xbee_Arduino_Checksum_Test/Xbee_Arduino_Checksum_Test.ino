@@ -60,6 +60,10 @@ void loop()
 				}
 			}
 
+			// Print time in milliseconds
+			Serial.print(millis());
+			Serial.print("\t");
+
 			// Print the floats followed by valid flag
 			for (int i = 0; i < 3; i++) {
 				Serial.print(vals[i], 3); // Print with 3 decimal places
