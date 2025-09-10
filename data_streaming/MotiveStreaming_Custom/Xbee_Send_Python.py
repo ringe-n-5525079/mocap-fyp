@@ -65,20 +65,32 @@ def receive_new_frame_with_data(data_dict):
             out_string += "/"
         print(out_string)
 
+# Checksum function for data verification
+def simple_checksum(data: str) -> int:
+    """Compute sum of ASCII bytes mod 256."""
+    return sum(data.encode('utf-8')) % 256
 
 # This is a callback function that gets connected to the NatNet client.
 # It is called once per rigid body per frame.
 def receive_rigid_body_frame(new_id, position, rotation):
     global ser
-    # Send only position; format: "ID,x,y,z\n"
     try:
         if ser and ser.is_open:
-            pos_str = f"{position[0]:.3f}\t{position[1]:.3f}\t{position[2]:.3f}\n"
-            print("Sending:", pos_str.strip())
-            ser.write(pos_str.encode('utf-8'))
+            # Create the payload (no newline yet)
+            data_part = f"{position[0]:.3f}\t{position[1]:.3f}\t{position[2]:.3f}"
+
+            # Compute checksum over data_part
+            checksum = simple_checksum(data_part)
+
+            # Build final packet: start marker + data + *checksum + newline
+            packet = f"${data_part}*{checksum}\n"
+
+            print("Sending:", packet.strip())
+            ser.write(packet.encode('utf-8'))
+
     except Exception as e:
         print(f"Error sending data over serial: {e}")
-    
+
 
     # pass
     # print("Received frame for rigid body", new_id)
@@ -273,7 +285,7 @@ if __name__ == "__main__":
         print("Serial port opened successfully.")
     except serial.SerialException as e:
         print(f"Error opening serial port: {e}")
-        sys.exit(1)    
+        sys.exit(1)
 
     is_looping = True
     time.sleep(1)
