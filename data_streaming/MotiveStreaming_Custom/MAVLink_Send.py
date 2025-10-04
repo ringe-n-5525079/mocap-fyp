@@ -31,13 +31,23 @@ import struct
 from pymavlink.dialects.v20 import common as mavlink2
 import math
 import time
+from pyquaternion import Quaternion
+import numpy as np
 
 # This is a callback function that gets connected to the NatNet client
 # and called once per mocap frame.
 
 # Define serial port that we open as a global variable
 ser = None
-mav = None
+# mav = None
+mav = mavlink2.MAVLink(ser)
+
+# Define coordinate transform matrix (Define N, E, D as Motive X, Z, -Y)
+R_motive_to_ned = np.array([
+        [1, 0, 0],
+        [0, 0, 1],
+        [0, -1, 0]
+    ], dtype=float)
 
 def receive_new_frame(data_dict):
     order_list = ["frameNumber", "markerSetCount", "unlabeledMarkersCount", #type: ignore  # noqa F841
@@ -83,46 +93,115 @@ def receive_rigid_body_frame(new_id, position, rotation):
     position: (x, y, z) in meters
     rotation: (qx, qy, qz, qw) quaternion
     """
-    global ser, mav
+    global ser, mav, R_motive_to_ned
+
+    ## DEFINE MAVLink MESSAGE TYPE
+    mavlink_msg_type = 'VISION_POSITION_ESTIMATE'
+    # mavlink_msg_type = 'ODOMETRY'
+
+
+    # Time keeping
+    # last_time = int(time.time() * 1e6)
     try:
+
         if ser and ser.is_open:
             # Current timestamp in microseconds
             usec = int(time.time() * 1e6)
 
-            # Convert quaternion -> roll, pitch, yaw
-            qx, qy, qz, qw = rotation
-            # yaw-pitch-roll (Z-Y-X intrinsic rotation)
-            sinr_cosp = 2.0 * (qw * qx + qy * qz)
-            cosr_cosp = 1.0 - 2.0 * (qx * qx + qy * qy)
-            roll = math.atan2(sinr_cosp, cosr_cosp)
 
-            sinp = 2.0 * (qw * qy - qz * qx)
-            if abs(sinp) >= 1:
-                pitch = math.copysign(math.pi/2, sinp)
-            else:
-                pitch = math.asin(sinp)
+            if mavlink_msg_type == 'VISION_POSITION_ESTIMATE':
+                # Convert quaternion -> roll, pitch, yaw
+                qx, qy, qz, qw = rotation
+                # yaw-pitch-roll (Z-Y-X intrinsic rotation)
+                sinr_cosp = 2.0 * (qw * qx + qy * qz)
+                cosr_cosp = 1.0 - 2.0 * (qx * qx + qy * qy)
+                roll = math.atan2(sinr_cosp, cosr_cosp)
 
-            siny_cosp = 2.0 * (qw * qz + qx * qy)
-            cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
-            yaw = math.atan2(siny_cosp, cosy_cosp)
+                sinp = 2.0 * (qw * qy - qz * qx)
+                if abs(sinp) >= 1:
+                    pitch = math.copysign(math.pi/2, sinp)
+                else:
+                    pitch = math.asin(sinp)
 
-            # Build MAVLink VISION_POSITION_ESTIMATE message
-            msg = mav.vision_position_estimate_encode(
-                usec,              # time_boot_us or UNIX epoch microseconds
-                position[0],       # x (m)
-                position[1],       # y (m)
-                position[2],       # z (m)
-                roll,              # roll (rad)
-                pitch,             # pitch (rad)
-                yaw                # yaw (rad)
-            )
+                siny_cosp = 2.0 * (qw * qz + qx * qy)
+                cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
+                yaw = math.atan2(siny_cosp, cosy_cosp)
 
-            # Send it over serial
-            ser.write(msg.pack(mav))
-            print(f"Sent VISION_POSITION_ESTIMATE: pos=({position[0]:.3f}, {position[1]:.3f}, {position[2]:.3f}) yaw={yaw:.2f} rad")
+                # Build MAVLink message
+                msg = mavlink2.MAVLink_vision_position_estimate_message(
+                    usec,              # time_boot_us or UNIX epoch microseconds
+                    position[0],       # x (m)
+                    position[1],       # y (m)
+                    position[2],       # z (m)
+                    roll,              # roll (rad)
+                    pitch,             # pitch (rad)
+                    yaw                # yaw (rad)
+                )
+
+                # Send it over serial
+                ser.write(msg.pack(mav))
+                print(f"Sent VISION_POSITION_ESTIMATE: pos=({position[0]:.3f}, {position[1]:.3f}, {position[2]:.3f}) yaw={yaw:.2f} rad")
+
+            elif mavlink_msg_type == 'ODOMETRY':
+                # Build MAVLink ODOMETRY message
+                p_ned = R_motive_to_ned @ np.array([position[0], position[2], -position[1]])
+                p_ned = p_ned.tolist()
+                x,y,z = float(p_ned[0]), float(p_ned[1]), float(p_ned[2])
+
+                qx, qy, qz, qw = rotation
+                q = transform_quaternion_motive_to_ned(qx, qy, qz, qw)
+
+                # Dummy values
+                vx, vy, vz = 0.0, 0.0, 0.0
+                rollspeed, pitchspeed, yawspeed = 0.0, 0.0, 0.0
+                pose_covariance = [0.0]*21
+                velocity_covariance = [0.0]*21
+                reset_counter = 0
+                
+                msg = mavlink2.MAVLink_odometry_message(
+                    usec,
+                    mavlink2.MAV_FRAME_LOCAL_NED, # frame_id
+                    mavlink2.MAV_FRAME_BODY_FRD, # child_frame_id
+                    x,
+                    y,
+                    z,
+                    q, # [w, x, y, z]
+                    vx,
+                    vy,
+                    vz,
+                    rollspeed,
+                    pitchspeed,
+                    yawspeed,
+                    pose_covariance,
+                    velocity_covariance,
+                    reset_counter,
+                    mavlink2.MAV_ESTIMATOR_TYPE_VISION
+                )
+
+                # msg = mavlink2.MAVLink_att_pos_mocap_message(
+                #     usec,
+                #     q, # [w, x, y, z]
+                #     x,
+                #     y,
+                #     z                 
+                # )
+
+                ser.write(msg.pack(mav))
+                print(f"Sent ODOMETRY (NED): x={x:.3f}, y={y:.3f}, z={z:.3f}, q={q}")
 
     except Exception as e:
-        print(f"Error sending MAVLink message: {e}")
+        print(f"Error sending MAVLink ODOMETRY message: {e}")
+
+def transform_quaternion_motive_to_ned(qx, qy, qz, qw):
+    global R_motive_to_ned
+
+    q_motive = Quaternion(qw, qx, qy, qz)
+
+    q_rot = Quaternion(matrix=R_motive_to_ned)
+
+    # Compose the final quaternion in the required coordinate system
+    q_body_ned = q_rot * q_motive
+    return [q_body_ned.w, q_body_ned.x, q_body_ned.y, q_body_ned.z]
 
 
 
@@ -268,8 +347,10 @@ if __name__ == "__main__":
     print("NatNet Python Client 4.3\n")
 
     # Select Multicast or Unicast
-    cast_choice = input("Select 0 for multicast and 1 for unicast: ")
-    cast_choice = int(cast_choice)
+    # cast_choice = input("Select 0 for multicast and 1 for unicast: ")
+    # cast_choice = int(cast_choice)
+    cast_choice = int(0) # Hard coding
+
     while cast_choice != 0 and cast_choice != 1:
         cast_choice = input("Invalid option. Select 0 for multicast or 1 for unicast: ") #type: ignore  # noqa F501
         cast_choice = int(cast_choice)
@@ -281,17 +362,22 @@ if __name__ == "__main__":
     streaming_client.set_use_multicast(optionsDict["use_multicast"])
 
     # allows user to set local address:
-    client_addr_choice = input("Client Address (127.0.0.1): ")
+    # client_addr_choice = input("Client Address (127.0.0.1): ")
+    client_addr_choice = "" # Hard coding
+
     if client_addr_choice != "":
         streaming_client.set_client_address(client_addr_choice)
 
     # allows user to set remote address
-    server_addr_choice = input("Server Address (127.0.0.1): ")
+    # server_addr_choice = input("Server Address (127.0.0.1): ")
+    server_addr_choice = "" # Hard coding
+
     if server_addr_choice != "":
         streaming_client.set_server_address(server_addr_choice)
 
     # select datastream preference
     stream_choice = None
+    stream_choice = 'd' # Hard coding
     while stream_choice != 'd' and stream_choice != 'c':
         stream_choice = input("Select d for datastream and c for command stream: ") #type: ignore  # noqa F501
     optionsDict["stream_type"] = stream_choice
@@ -310,7 +396,7 @@ if __name__ == "__main__":
 
     # Initialize serial connection to XBee
     try:
-        ser = serial.Serial(port='COM3', baudrate=115200, timeout=1)  # Change COM3 to your port
+        ser = serial.Serial(port='COM3', baudrate=230400, timeout=1)  # Change COM3 to your port
         print("Serial port opened successfully.")
     except serial.SerialException as e:
         print(f"Error opening serial port: {e}")
