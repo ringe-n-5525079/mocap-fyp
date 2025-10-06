@@ -144,7 +144,7 @@ def receive_rigid_body_frame(new_id, position, rotation):
 
                 # Send it over serial
                 ser.write(msg.pack(mav))
-                print(f"Sent VISION_POSITION_ESTIMATE: pos=({position[0]:.3f}, {position[1]:.3f}, {position[2]:.3f}) yaw={yaw:.2f} rad")
+                print(f"Sent VISION_POSITION_ESTIMATE: pos=({p_ned[0]:.3f}, {p_ned[1]:.3f}, {p_ned[2]:.3f}), roll={roll:.2f} rad, pitch={pitch:.2f} rad, yaw={yaw:.2f} rad")
 
             elif mavlink_msg_type == 'ODOMETRY':
                 # Build MAVLink ODOMETRY message
