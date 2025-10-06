@@ -127,12 +127,16 @@ def receive_rigid_body_frame(new_id, position, rotation):
                 cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
                 yaw = math.atan2(siny_cosp, cosy_cosp)
 
+                # Convert to NED frame
+                p_ned = R_motive_to_ned @ np.array([position[0], position[1], position[2]])
+                p_ned = p_ned.tolist()
+
                 # Build MAVLink message
                 msg = mavlink2.MAVLink_vision_position_estimate_message(
                     usec,              # time_boot_us or UNIX epoch microseconds
-                    position[0],       # x (m)
-                    position[1],       # y (m)
-                    position[2],       # z (m)
+                    p_ned[0],       # x (m)
+                    p_ned[1],       # y (m)
+                    p_ned[2],       # z (m)
                     roll,              # roll (rad)
                     pitch,             # pitch (rad)
                     yaw                # yaw (rad)
@@ -144,7 +148,7 @@ def receive_rigid_body_frame(new_id, position, rotation):
 
             elif mavlink_msg_type == 'ODOMETRY':
                 # Build MAVLink ODOMETRY message
-                p_ned = R_motive_to_ned @ np.array([position[0], position[2], -position[1]])
+                p_ned = R_motive_to_ned @ np.array([position[0], position[1], position[2]])
                 p_ned = p_ned.tolist()
                 x,y,z = float(p_ned[0]), float(p_ned[1]), float(p_ned[2])
 
@@ -157,7 +161,7 @@ def receive_rigid_body_frame(new_id, position, rotation):
                 pose_covariance = [0.0]*21
                 velocity_covariance = [0.0]*21
                 reset_counter = 0
-                
+
                 msg = mavlink2.MAVLink_odometry_message(
                     usec,
                     mavlink2.MAV_FRAME_LOCAL_NED, # frame_id
@@ -183,7 +187,7 @@ def receive_rigid_body_frame(new_id, position, rotation):
                 #     q, # [w, x, y, z]
                 #     x,
                 #     y,
-                #     z                 
+                #     z
                 # )
 
                 ser.write(msg.pack(mav))
