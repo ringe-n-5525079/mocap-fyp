@@ -1,5 +1,7 @@
 vehicle_visual_odometry 8
 vehicle_local_position 5
+vehicle_local_position_setpoint 100
+vehicle_constraints 100
 vehicle_odometry 5
 vehicle_status 200
 vehicle_command 100
