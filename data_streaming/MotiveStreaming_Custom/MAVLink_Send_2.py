@@ -1,0 +1,667 @@
+
+#============================================================================= #type: ignore  # noqa E501
+# Copyright © 2025 NaturalPoint, Inc. All Rights Reserved.
+#
+# THIS SOFTWARE IS GOVERNED BY THE OPTITRACK PLUGINS EULA AVAILABLE AT https://www.optitrack.com/about/legal/eula.html #type: ignore  # noqa E501
+# AND/OR FOR DOWNLOAD WITH THE APPLICABLE SOFTWARE FILE(S) (“PLUGINS EULA”). BY DOWNLOADING, INSTALLING, ACTIVATING #type: ignore  # noqa E501
+# AND/OR OTHERWISE USING THE SOFTWARE, YOU ARE AGREEING THAT YOU HAVE READ, AND THAT YOU AGREE TO COMPLY WITH AND ARE #type: ignore  # noqa E501
+# BOUND BY, THE PLUGINS EULA AND ALL APPLICABLE LAWS AND REGULATIONS. IF YOU DO NOT AGREE TO BE BOUND BY THE PLUGINS #type: ignore  # noqa E501
+# EULA, THEN YOU MAY NOT DOWNLOAD, INSTALL, ACTIVATE OR OTHERWISE USE THE SOFTWARE AND YOU MUST PROMPTLY DELETE OR #type: ignore  # noqa E501
+# RETURN IT. IF YOU ARE DOWNLOADING, INSTALLING, ACTIVATING AND/OR OTHERWISE USING THE SOFTWARE ON BEHALF OF AN ENTITY, #type: ignore  # noqa E501
+# THEN BY DOING SO YOU REPRESENT AND WARRANT THAT YOU HAVE THE APPROPRIATE AUTHORITY TO ACCEPT THE PLUGINS EULA ON #type: ignore  # noqa E501
+# BEHALF OF SUCH ENTITY. See license file in root directory for additional governing terms and information. #type: ignore  # noqa E501
+#============================================================================= #type: ignore  # noqa E501
+
+
+# OptiTrack NatNet direct depacketization sample for Python 3.x
+#
+# Uses the Python NatNetClient.py library to establish
+# a connection and receive data via that NatNet connection
+# to decode it using the NatNetClientLibrary.
+
+import sys
+import time
+from NatNetClient import NatNetClient
+import DataDescriptions
+import MoCapData
+
+import serial
+import struct
+
+from pymavlink.dialects.v20 import common as mavlink2
+import math
+import time
+from pyquaternion import Quaternion
+import numpy as np
+
+# This is a callback function that gets connected to the NatNet client
+# and called once per mocap frame.
+
+# Define serial port that we open as a global variable
+ser = None
+# mav = None
+mav = mavlink2.MAVLink(ser)
+
+# Define coordinate transform matrix (Define N, E, D as Motive X, Z, -Y)
+R_motive_to_ned = np.array([
+        [1, 0, 0],
+        [0, 0, 1],
+        [0, -1, 0]
+    ], dtype=float)
+
+def receive_new_frame(data_dict):
+    order_list = ["frameNumber", "markerSetCount", "unlabeledMarkersCount", #type: ignore  # noqa F841
+                  "rigidBodyCount", "skeletonCount", "labeledMarkerCount",
+                  "timecode", "timecodeSub", "timestamp", "isRecording",
+                  "trackedModelsChanged"]
+    dump_args = False
+    if dump_args is True:
+        out_string = "    "
+        for key in data_dict:
+            out_string += key + "= "
+            if key in data_dict:
+                out_string += data_dict[key] + " "
+            out_string += "/"
+        print(out_string)
+
+
+def receive_new_frame_with_data(data_dict):
+    order_list = ["frameNumber", "markerSetCount", "unlabeledMarkersCount", #type: ignore  # noqa F841
+                  "rigidBodyCount", "skeletonCount", "labeledMarkerCount",
+                  "timecode", "timecodeSub", "timestamp", "isRecording",
+                  "trackedModelsChanged", "offset", "mocap_data"]
+    dump_args = True
+    if dump_args is True:
+        out_string = "    "
+        for key in data_dict:
+            out_string += key + "= "
+            if key in data_dict:
+                out_string += str(data_dict[key]) + " "
+            out_string += "/"
+        print(out_string)
+
+# Checksum function for data verification
+def simple_checksum(data: str) -> int:
+    """Compute sum of ASCII bytes mod 256."""
+    return sum(data.encode('utf-8')) % 256
+
+# This is a callback function that gets connected to the NatNet client.
+# It is called once per rigid body per frame.
+def receive_rigid_body_frame(new_id, position, rotation):
+    """
+    new_id: rigid body id
+    position: (x, y, z) in meters
+    rotation: (qx, qy, qz, qw) quaternion
+    """
+    global ser, mav, R_motive_to_ned
+
+    ## DEFINE MAVLink MESSAGE TYPE
+    mavlink_msg_type = 'VISION_POSITION_ESTIMATE'
+    # mavlink_msg_type = 'ODOMETRY'
+
+
+    # Time keeping
+    # last_time = int(time.time() * 1e6)
+    try:
+
+        if ser and ser.is_open:
+            # Current timestamp in microseconds
+            usec = int(time.time() * 1e6)
+
+
+            if mavlink_msg_type == 'VISION_POSITION_ESTIMATE':
+                # Convert quaternion -> roll, pitch, yaw
+                qx, qy, qz, qw = rotation
+                # yaw-pitch-roll (Z-Y-X intrinsic rotation)
+                sinr_cosp = 2.0 * (qw * qx + qy * qz)
+                cosr_cosp = 1.0 - 2.0 * (qx * qx + qy * qy)
+                roll = math.atan2(sinr_cosp, cosr_cosp)
+
+                sinp = 2.0 * (qw * qy - qz * qx)
+                if abs(sinp) >= 1:
+                    pitch = math.copysign(math.pi/2, sinp)
+                else:
+                    pitch = math.asin(sinp)
+
+                siny_cosp = 2.0 * (qw * qz + qx * qy)
+                cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
+                yaw = math.atan2(siny_cosp, cosy_cosp)
+
+                # Convert to NED frame
+                p_ned = R_motive_to_ned @ np.array([position[0], position[1], position[2]])
+                p_ned = p_ned.tolist()
+
+                # Build MAVLink message
+                msg = mavlink2.MAVLink_vision_position_estimate_message(
+                    usec,              # time_boot_us or UNIX epoch microseconds
+                    p_ned[0],       # x (m)
+                    p_ned[1],       # y (m)
+                    p_ned[2],       # z (m)
+                    roll,              # roll (rad)
+                    pitch,             # pitch (rad)
+                    yaw                # yaw (rad)
+                )
+
+                # Send it over serial
+                ser.write(msg.pack(mav))
+                print(f"Sent VISION_POSITION_ESTIMATE: pos=({p_ned[0]:.3f}, {p_ned[1]:.3f}, {p_ned[2]:.3f}), roll={roll:.2f} rad, pitch={pitch:.2f} rad, yaw={yaw:.2f} rad")
+
+            elif mavlink_msg_type == 'ODOMETRY':
+                # Build MAVLink ODOMETRY message
+                p_ned = R_motive_to_ned @ np.array([position[0], position[1], position[2]])
+                p_ned = p_ned.tolist()
+                x,y,z = float(p_ned[0]), float(p_ned[1]), float(p_ned[2])
+
+                qx, qy, qz, qw = rotation
+                q = transform_quaternion_motive_to_ned(qx, qy, qz, qw)
+
+                # Dummy values
+                vx, vy, vz = 0.0, 0.0, 0.0
+                rollspeed, pitchspeed, yawspeed = 0.0, 0.0, 0.0
+                pose_covariance = [0.0]*21
+                velocity_covariance = [0.0]*21
+                reset_counter = 0
+
+                msg = mavlink2.MAVLink_odometry_message(
+                    usec,
+                    mavlink2.MAV_FRAME_LOCAL_NED, # frame_id
+                    mavlink2.MAV_FRAME_BODY_FRD, # child_frame_id
+                    x,
+                    y,
+                    z,
+                    q, # [w, x, y, z]
+                    vx,
+                    vy,
+                    vz,
+                    rollspeed,
+                    pitchspeed,
+                    yawspeed,
+                    pose_covariance,
+                    velocity_covariance,
+                    reset_counter,
+                    mavlink2.MAV_ESTIMATOR_TYPE_VISION
+                )
+
+                # msg = mavlink2.MAVLink_att_pos_mocap_message(
+                #     usec,
+                #     q, # [w, x, y, z]
+                #     x,
+                #     y,
+                #     z
+                # )
+
+                ser.write(msg.pack(mav))
+                print(f"Sent ODOMETRY (NED): x={x:.3f}, y={y:.3f}, z={z:.3f}, q={q}")
+
+    except Exception as e:
+        print(f"Error sending MAVLink ODOMETRY message: {e}")
+
+def transform_quaternion_motive_to_ned(qx, qy, qz, qw):
+    global R_motive_to_ned
+
+    q_motive = Quaternion(qw, qx, qy, qz)
+
+    q_rot = Quaternion(matrix=R_motive_to_ned)
+
+    # Compose the final quaternion in the required coordinate system
+    q_body_ned = q_rot * q_motive
+    return [q_body_ned.w, q_body_ned.x, q_body_ned.y, q_body_ned.z]
+
+
+
+def add_lists(totals, totals_tmp):
+    totals[0] += totals_tmp[0]
+    totals[1] += totals_tmp[1]
+    totals[2] += totals_tmp[2]
+    return totals
+
+
+def print_configuration(natnet_client):
+    natnet_client.refresh_configuration()
+    print("Connection Configuration:")
+    print("  Client:          %s" % natnet_client.local_ip_address)
+    print("  Server:          %s" % natnet_client.server_ip_address)
+    print("  Command Port:    %d" % natnet_client.command_port)
+    print("  Data Port:       %d" % natnet_client.data_port)
+
+    changeBitstreamString = "  Can Change Bitstream Version = "
+    if natnet_client.use_multicast:
+        print("  Using Multicast")
+        print("  Multicast Group: %s" % natnet_client.multicast_address)
+        changeBitstreamString += "false"
+    else:
+        print("  Using Unicast")
+        changeBitstreamString += "true"
+
+    # NatNet Server Info
+    application_name = natnet_client.get_application_name()
+    nat_net_requested_version = natnet_client.get_nat_net_requested_version()
+    nat_net_version_server = natnet_client.get_nat_net_version_server()
+    server_version = natnet_client.get_server_version()
+
+    print("  NatNet Server Info")
+    print("    Application Name %s" % (application_name))
+    print("    MotiveVersion  %d %d %d %d" % (server_version[0], server_version[1], server_version[2], server_version[3]))  #type: ignore  # noqa F501
+    print("    NatNetVersion  %d %d %d %d" % (nat_net_version_server[0], nat_net_version_server[1], nat_net_version_server[2], nat_net_version_server[3])) #type: ignore  # noqa F501
+    print("  NatNet Bitstream Requested")
+    print("    NatNetVersion  %d %d %d %d" % (nat_net_requested_version[0], nat_net_requested_version[1], #type: ignore  # noqa F501
+                                              nat_net_requested_version[2], nat_net_requested_version[3])) #type: ignore  # noqa F501
+
+    print(changeBitstreamString)
+    # print("command_socket = %s" % (str(natnet_client.command_socket)))
+    # print("data_socket    = %s" % (str(natnet_client.data_socket)))
+    print("  PythonVersion    %s" % (sys.version))
+
+
+def print_commands(can_change_bitstream):
+    outstring = "Commands:\n"
+    outstring += "Return Data from Motive\n"
+    outstring += "  s  send data descriptions\n"
+    outstring += "  r  resume/start frame playback\n"
+    outstring += "  p  pause frame playback\n"
+    outstring += "     pause may require several seconds\n"
+    outstring += "     depending on the frame data size\n"
+    outstring += "Change Working Range\n"
+    outstring += "  o  reset Working Range to: start/current/end frame 0/0/end of take\n" #type: ignore  # noqa F501
+    outstring += "  w  set Working Range to: start/current/end frame 1/100/1500\n" #type: ignore  # noqa F501
+    outstring += "Return Data Display Modes\n"
+    outstring += "  j  print_level = 0 supress data description and mocap frame data\n" #type: ignore  # noqa F501
+    outstring += "  k  print_level = 1 show data description and mocap frame data\n" #type: ignore  # noqa F501
+    outstring += "  l  print_level = 20 show data description and every 20th mocap frame data\n" #type: ignore  # noqa F501
+    outstring += "Change NatNet data stream version (Unicast only)\n"
+    outstring += "  3  Request NatNet 3.1 data stream (Unicast only)\n"
+    outstring += "  4  Request NatNet 4.1 data stream (Unicast only)\n"
+    outstring += "General\n"
+    outstring += "  t  data structures self test (no motive/server interaction)\n" #type: ignore  # noqa F501
+    outstring += "  c  print configuration\n"
+    outstring += "  h  print commands\n"
+    outstring += "  q  quit\n"
+    outstring += "\n"
+    outstring += "NOTE: Motive frame playback will respond differently in\n"
+    outstring += "       Endpoint, Loop, and Bounce playback modes.\n"
+    outstring += "\n"
+    outstring += "EXAMPLE: PacketClient [serverIP [ clientIP [ Multicast/Unicast]]]\n" #type: ignore  # noqa F501
+    outstring += "         PacketClient \"192.168.10.14\" \"192.168.10.14\" Multicast\n" #type: ignore  # noqa F501
+    outstring += "         PacketClient \"127.0.0.1\" \"127.0.0.1\" u\n"
+    outstring += "\n"
+    print(outstring)
+
+
+def request_data_descriptions(s_client):
+    # Request the model definitions
+    s_client.send_request(s_client.command_socket, s_client.NAT_REQUEST_MODELDEF, "",  (s_client.server_ip_address, s_client.command_port)) #type: ignore  # noqa F501
+
+
+def test_classes():
+    totals = [0, 0, 0]
+    print("Test Data Description Classes")
+    totals_tmp = DataDescriptions.test_all()
+    totals = add_lists(totals, totals_tmp)
+    print("")
+    print("Test MoCap Frame Classes")
+    totals_tmp = MoCapData.test_all()
+    totals = add_lists(totals, totals_tmp)
+    print("")
+    print("All Tests totals")
+    print("--------------------")
+    print("[PASS] Count = %3.1d" % totals[0])
+    print("[FAIL] Count = %3.1d" % totals[1])
+    print("[SKIP] Count = %3.1d" % totals[2])
+
+
+def my_parse_args(arg_list, args_dict):
+    # set up base values
+    arg_list_len = len(arg_list)
+    if arg_list_len > 1:
+        args_dict["serverAddress"] = arg_list[1]
+        if arg_list_len > 2:
+            args_dict["clientAddress"] = arg_list[2]
+        if arg_list_len > 3:
+            if len(arg_list[3]):
+                args_dict["use_multicast"] = True
+                if arg_list[3][0].upper() == "U":
+                    args_dict["use_multicast"] = False
+        if arg_list_len > 4:
+            args_dict["stream_type"] = arg_list[4]
+    return args_dict
+
+
+if __name__ == "__main__":
+
+    optionsDict = {}
+    optionsDict["clientAddress"] = "127.0.0.1"
+    optionsDict["serverAddress"] = "127.0.0.1"
+    optionsDict["use_multicast"] = None
+    optionsDict["stream_type"] = None
+    stream_type_arg = None
+
+    # This will create a new NatNet client
+    optionsDict = my_parse_args(sys.argv, optionsDict)
+    streaming_client = NatNetClient()
+    streaming_client.set_client_address(optionsDict["clientAddress"])
+    streaming_client.set_server_address(optionsDict["serverAddress"])
+
+    # Streaming client configuration.
+    # Calls RB handler on emulator for data transmission.
+    streaming_client.new_frame_listener = receive_new_frame
+    # streaming_client.new_frame_with_data_listener = receive_new_frame_with_data  # type ignore # noqa E501
+    streaming_client.rigid_body_listener = receive_rigid_body_frame
+
+    # print instructions
+    print("NatNet Python Client 4.3\n")
+
+    # Select Multicast or Unicast
+    # cast_choice = input("Select 0 for multicast and 1 for unicast: ")
+    # cast_choice = int(cast_choice)
+    cast_choice = int(0) # Hard coding
+
+    while cast_choice != 0 and cast_choice != 1:
+        cast_choice = input("Invalid option. Select 0 for multicast or 1 for unicast: ") #type: ignore  # noqa F501
+        cast_choice = int(cast_choice)
+    # establishes multicast or unicast
+    if cast_choice == 0:
+        optionsDict["use_multicast"] = True
+    else:
+        optionsDict["use_multicast"] = False
+    streaming_client.set_use_multicast(optionsDict["use_multicast"])
+
+    # allows user to set local address:
+    # client_addr_choice = input("Client Address (127.0.0.1): ")
+    client_addr_choice = "" # Hard coding
+
+    if client_addr_choice != "":
+        streaming_client.set_client_address(client_addr_choice)
+
+    # allows user to set remote address
+    # server_addr_choice = input("Server Address (127.0.0.1): ")
+    server_addr_choice = "" # Hard coding
+
+    if server_addr_choice != "":
+        streaming_client.set_server_address(server_addr_choice)
+
+    # select datastream preference
+    stream_choice = None
+    stream_choice = 'd' # Hard coding
+    while stream_choice != 'd' and stream_choice != 'c':
+        stream_choice = input("Select d for datastream and c for command stream: ") #type: ignore  # noqa F501
+    optionsDict["stream_type"] = stream_choice
+
+    # Start up the streaming client now that the callbacks are set up.
+    # This will run perpetually, and operate on a separate thread.
+    is_running = streaming_client.run(optionsDict["stream_type"])
+    if not is_running:
+        print("ERROR: Could not start streaming client.")
+        try:
+            sys.exit(1)
+        except SystemExit:
+            print("...")
+        finally:
+            print("exiting")
+
+    # ----------------------------------------------------------
+    # START MAVLINK STREAMING THREAD
+    # ----------------------------------------------------------
+    import threading
+
+    # Shared variable to hold the latest rigid body pose
+    latest_pose = {"pos": None, "rot": None}
+    pose_lock = threading.Lock()
+
+    # Modify receive_rigid_body_frame to update this variable
+    def receive_rigid_body_frame(new_id, position, rotation):
+        global latest_pose, pose_lock
+        with pose_lock:
+            latest_pose["pos"] = position
+            latest_pose["rot"] = rotation
+        # existing MAVLink send code is handled by the thread below
+
+    # MAVLink sending loop
+    def mavlink_send_loop():
+        global ser, mav, latest_pose, pose_lock
+        rate_hz = 30  # how often to send (Hz)
+        period = 1.0 / rate_hz
+
+        while True:
+            time.sleep(period)
+            with pose_lock:
+                if latest_pose["pos"] is None:
+                    continue
+                position = latest_pose["pos"]
+                rotation = latest_pose["rot"]
+
+            try:
+                usec = int(time.time() * 1e6)
+                qx, qy, qz, qw = rotation
+
+                # Convert quaternion to roll, pitch, yaw
+                sinr_cosp = 2.0 * (qw * qx + qy * qz)
+                cosr_cosp = 1.0 - 2.0 * (qx * qx + qy * qy)
+                roll = math.atan2(sinr_cosp, cosr_cosp)
+                sinp = 2.0 * (qw * qy - qz * qx)
+                pitch = math.copysign(math.pi / 2, sinp) if abs(sinp) >= 1 else math.asin(sinp)
+                siny_cosp = 2.0 * (qw * qz + qx * qy)
+                cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
+                yaw = math.atan2(siny_cosp, cosy_cosp)
+
+                # Convert to NED
+                p_ned = R_motive_to_ned @ np.array(position)
+                x, y, z = p_ned.tolist()
+
+                msg = mavlink2.MAVLink_vision_position_estimate_message(
+                    usec, x, y, z, roll, pitch, yaw
+                )
+                ser.write(msg.pack(mav))
+
+                print(f"[MAVLink] Sent VISION_POSITION_ESTIMATE: "
+                    f"x={x:.3f}, y={y:.3f}, z={z:.3f}, "
+                    f"roll={roll:.2f}, pitch={pitch:.2f}, yaw={yaw:.2f}")
+            except Exception as e:
+                print(f"[MAVLink] Error sending: {e}")
+
+    # Start MAVLink thread
+    mavlink_thread = threading.Thread(target=mavlink_send_loop, daemon=True)
+    mavlink_thread.start()
+    # ----------------------------------------------------------
+
+
+    # Initialize serial connection to XBee
+    try:
+        ser = serial.Serial(port='COM3', baudrate=230400, timeout=1)  # Change COM3 to your port
+        print("Serial port opened successfully.")
+    except serial.SerialException as e:
+        print(f"Error opening serial port: {e}")
+        sys.exit(1)
+
+    mav = mavlink2.MAVLink(ser)
+
+import threading
+
+# ==========================================
+# NEW: RELATIVE POSITION TARGET THREAD
+# ==========================================
+
+target = [0.0, 0.0, 0.0]
+send_pos_thread_running = True
+
+def send_relative_position_loop():
+    """Continuously send the last position target (relative to current body frame)."""
+    global target, ser, mav
+    frame = mavlink2.MAV_FRAME_BODY_OFFSET_NED
+    type_mask = 0b0000111111111000  # Enable position only
+
+    while send_pos_thread_running:
+        try:
+            if ser and ser.is_open:
+                usec = int(time.time() * 1e6)
+                msg = mavlink2.MAVLink_set_position_target_local_ned_message(
+                    usec,                   # time_boot_ms (microseconds)
+                    1,                      # target_system (PX4 usually = 1)
+                    0,                      # target_component
+                    frame,                  # coordinate frame (relative)
+                    type_mask,              # enable only x,y,z position
+                    target[0],              # x (forward)
+                    target[1],              # y (right)
+                    target[2],              # z (down)
+                    0, 0, 0,                # vx, vy, vz
+                    0, 0, 0,                # afx, afy, afz
+                    0, 0                    # yaw, yaw_rate
+                )
+                ser.write(msg.pack(mav))
+            time.sleep(0.1)
+        except Exception as e:
+            print(f"[ERROR send_relative_position_loop]: {e}")
+            time.sleep(1)
+
+def user_input_loop():
+    """Listen for user input and update the target position."""
+    global target, send_pos_thread_running
+    print("\n=== Relative Position Control Active ===")
+    print("Enter new relative targets as: x y z (meters, BODY_OFFSET_NED frame)")
+    print("Example: '1 0 0' = move 1 m forward relative to current heading")
+    print("Press Ctrl+C to exit this mode.\n")
+
+    try:
+        while True:
+            user_in = input("> ")
+            if not user_in.strip():
+                continue
+            parts = user_in.strip().split()
+            if len(parts) != 3:
+                print("Please enter exactly 3 numbers.")
+                continue
+            try:
+                target = [float(p) for p in parts]
+                print(f"Updated relative target: {target}")
+            except ValueError:
+                print("Invalid numbers.")
+    except KeyboardInterrupt:
+        print("Stopping position target thread...")
+        send_pos_thread_running = False
+        return
+
+# ==========================================
+# AFTER YOU INITIALISE SERIAL + MAVLINK
+# ==========================================
+
+# Example from your main section:
+# ser = serial.Serial(port='COM3', baudrate=230400, timeout=1)
+# mav = mavlink2.MAVLink(ser)
+
+# Start relative-position thread once PX4 link is ready
+threading.Thread(target=send_relative_position_loop, daemon=True).start()
+threading.Thread(target=user_input_loop, daemon=True).start()
+
+
+    is_looping = True
+    time.sleep(1)
+    if streaming_client.connected() is False:
+        print("ERROR: Could not connect properly.  Check that Motive streaming is on.") #type: ignore  # noqa F501
+        try:
+            sys.exit(2)
+        except SystemExit:
+            print("...")
+        finally:
+            print("exiting")
+
+    print_configuration(streaming_client)
+    print("\n")
+    print_commands(streaming_client.can_change_bitstream_version())
+
+    while is_looping:
+        inchars = input('Enter command or (\'h\' for list of commands)\n')
+        if len(inchars) > 0:
+            c1 = inchars[0].lower()
+            if c1 == 'h':
+                print_commands(streaming_client.can_change_bitstream_version())
+            elif c1 == 'c':
+                print_configuration(streaming_client)
+            elif c1 == 's':
+                request_data_descriptions(streaming_client)
+                time.sleep(1)
+            elif (c1 == '3') or (c1 == '4'):
+                if streaming_client.can_change_bitstream_version():
+                    tmp_major = 4
+                    tmp_minor = 2
+                    if (c1 == '3'):
+                        tmp_major = 3
+                        tmp_minor = 1
+                    return_code = streaming_client.set_nat_net_version(tmp_major, tmp_minor) #type: ignore  # noqa F501
+                    time.sleep(1)
+                    if return_code == -1:
+                        print("Could not change bitstream version to %d.%d" % (tmp_major, tmp_minor)) #type: ignore  # noqa F501
+                    else:
+                        print("Bitstream version at %d.%d" % (tmp_major, tmp_minor)) #type: ignore  # noqa F501
+                else:
+                    print("Can only change bitstream in Unicast Mode")
+
+            elif c1 == 'p':
+                sz_command = "TimelineStop"
+                return_code = streaming_client.send_command(sz_command)
+                time.sleep(1)
+                print("Command: %s - return_code: %d" % (sz_command, return_code)) #type: ignore  # noqa F501
+            elif c1 == 'r':
+                sz_command = "TimelinePlay"
+                return_code = streaming_client.send_command(sz_command)
+                print("Command: %s - return_code: %d" % (sz_command, return_code)) #type: ignore  # noqa F501
+            elif c1 == 'o':
+                tmpCommands = ["TimelinePlay",
+                               "TimelineStop",
+                               "SetPlaybackStartFrame,0",
+                               "SetPlaybackStopFrame,1000000",
+                               "SetPlaybackLooping,0",
+                               "SetPlaybackCurrentFrame,0",
+                               "TimelineStop"]
+                for sz_command in tmpCommands:
+                    return_code = streaming_client.send_command(sz_command)
+                    print("Command: %s - return_code: %d" % (sz_command, return_code)) #type: ignore  # noqa F501
+                time.sleep(1)
+            elif c1 == 'w':
+                tmp_commands = ["TimelinePlay",
+                                "TimelineStop",
+                                "SetPlaybackStartFrame,1",
+                                "SetPlaybackStopFrame,1500",
+                                "SetPlaybackLooping,0",
+                                "SetPlaybackCurrentFrame,100",
+                                "TimelineStop"]
+                for sz_command in tmp_commands:
+                    return_code = streaming_client.send_command(sz_command)
+                    print("Command: %s - return_code: %d" % (sz_command, return_code)) #type: ignore  # noqa F501
+                time.sleep(1)
+            elif c1 == 't':
+                test_classes()
+
+            elif c1 == 'j':
+                streaming_client.set_print_level(0)
+                print("Showing only received frame numbers and supressing data descriptions") #type: ignore  # noqa F501
+            elif c1 == 'k':
+                streaming_client.set_print_level(1)
+                print("Showing every received frame")
+
+            elif c1 == 'l':
+                print_level = streaming_client.set_print_level(20)
+                print_level_mod = print_level % 100
+                if (print_level == 0):
+                    print("Showing only received frame numbers and supressing data descriptions") #type: ignore  # noqa F501
+                elif (print_level == 1):
+                    print("Showing every frame")
+                elif (print_level_mod == 1):
+                    print("Showing every %dst frame" % print_level)
+                elif (print_level_mod == 2):
+                    print("Showing every %dnd frame" % print_level)
+                elif (print_level == 3):
+                    print("Showing every %drd frame" % print_level)
+                else:
+                    print("Showing every %dth frame" % print_level)
+
+            elif c1 == 'q':
+                is_looping = False
+                streaming_client.shutdown()
+
+                ser.close()
+                print("Serial port closed.")
+
+                break
+            else:
+                print("Error: Command %s not recognized" % c1)
+            print("Ready...\n")
+    print("exiting")
