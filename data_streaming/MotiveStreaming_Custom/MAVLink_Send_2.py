@@ -45,8 +45,8 @@ mav = mavlink2.MAVLink(ser)
 # Define coordinate transform matrix (Define N, E, D as Motive X, Z, -Y)
 R_motive_to_ned = np.array([
         [1, 0, 0],
-        [0, 0, 1],
-        [0, -1, 0]
+        [0, 1, 0],
+        [0, 0, -1]
     ], dtype=float)
 
 def receive_new_frame(data_dict):
@@ -90,7 +90,7 @@ def simple_checksum(data: str) -> int:
 def receive_rigid_body_frame(new_id, position, rotation):
     """
     new_id: rigid body id
-    position: (x, y, z) in meters
+    position: (x, z, y) in meters
     rotation: (qx, qy, qz, qw) quaternion
     """
     global ser, mav, R_motive_to_ned

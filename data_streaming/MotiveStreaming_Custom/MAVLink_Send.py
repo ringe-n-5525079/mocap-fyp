@@ -45,8 +45,8 @@ mav = mavlink2.MAVLink(ser)
 # Define coordinate transform matrix (Define N, E, D as Motive X, Z, -Y)
 R_motive_to_ned = np.array([
         [1, 0, 0],
-        [0, 0, 1],
-        [0, -1, 0]
+        [0, 1, 0],
+        [0, 0, -1]
     ], dtype=float)
 
 def receive_new_frame(data_dict):
